@@ -3,7 +3,7 @@ import json
 import lokalise
 from django.conf import settings
 from rest_framework import status
-from rest_framework.mixins import CreateModelMixin, UpdateModelMixin
+from rest_framework.mixins import CreateModelMixin, ListModelMixin, UpdateModelMixin
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -19,7 +19,7 @@ from .utils import get_all_translating_keys
 client = lokalise.Client(settings.LOKALISE_API_TOKEN)
 
 
-class ToolViewSet(CreateModelMixin, UpdateModelMixin, GenericViewSet):
+class ToolViewSet(ListModelMixin, CreateModelMixin, UpdateModelMixin, GenericViewSet):
     queryset = Tool.objects.all()
     serializer_class = ToolSerializer
 
