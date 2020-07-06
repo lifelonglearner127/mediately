@@ -7,6 +7,7 @@ from config import celery_app
 
 from .exceptions import GitHubApiError
 from .githubclient import GithubAPI
+from .models import Log
 from .utils import populate_with_translating_value
 
 client = lokalise.Client(settings.LOKALISE_API_TOKEN)
@@ -14,15 +15,20 @@ client = lokalise.Client(settings.LOKALISE_API_TOKEN)
 
 @celery_app.task()
 def update_task(context):
+    tool_id = context.get('tool_id')
     tool_name = context.get('tool_name')
     tool_language = context.get('tool_language')
     if not tool_name or not tool_language:
         return
 
     try:
-        is_found, master_file_name = GithubAPI.repository_has_sepc_files(tool_name, tool_language)
+        _, master_file_name, _ = GithubAPI.repository_has_sepc_files(tool_name, tool_language)
         if not master_file_name:
             # Github does not include the {tool_language} tool master file
+            Log.objects.create(
+                description=f"Github does not include the any seed files related to "
+                            f"your requested {tool_name} spec file."
+            )
             return
 
         payload = GithubAPI.repository_read_spec(master_file_name)
@@ -45,6 +51,9 @@ def update_task(context):
 
         if not language_id:
             # Your supplied language code {tool_language} does not exists
+            Log.objects.create(
+                description=f"Your Lokalise Project does not contains the {tool_language} translation"
+            )
             return
 
         # handle paginations of fetching keys
@@ -76,11 +85,18 @@ def update_task(context):
             json.dump(payload, f, indent=4)
 
         # create pull request
-        GithubAPI.create_pull_request(tool_name, tool_language, payload)
+        GithubAPI.create_pull_request(tool_id, tool_name, tool_language, payload)
+
+        Log.objects.create(
+            description="Created pull requested"
+        )
 
     except GitHubApiError:
-        pass
+        Log.objects.create(
+            description="Github error api error"
+        )
+
     except Exception as e:
-        # TODO: logger
-        print(e)
-        pass
+        Log.objects.create(
+            description=f"{e}"
+        )

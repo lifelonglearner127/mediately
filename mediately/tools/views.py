@@ -13,8 +13,8 @@ from .exceptions import GitHubApiError
 from .githubclient import GithubAPI
 from .models import Tool
 from .serializers import ToolSerializer
-from .tasks import update_task
-from .utils import get_all_translating_keys
+# from .tasks import update_task
+from .utils import get_all_translating_keys, populate_with_translating_value
 
 client = lokalise.Client(settings.LOKALISE_API_TOKEN)
 
@@ -22,6 +22,16 @@ client = lokalise.Client(settings.LOKALISE_API_TOKEN)
 class ToolViewSet(ListModelMixin, CreateModelMixin, UpdateModelMixin, GenericViewSet):
     queryset = Tool.objects.all()
     serializer_class = ToolSerializer
+    permission_classes = [AllowAny]
+
+    def list(self, request, *args, **kwargs):
+        queryset = Tool.objects.all()
+        return Response(
+            {
+                'code': 0,
+                'data': self.serializer_class(queryset, many=True).data
+            }
+        )
 
     def create(self, request, *args, **kwargs):
         serializer = ToolSerializer(data=request.data)
@@ -35,12 +45,14 @@ class ToolViewSet(ListModelMixin, CreateModelMixin, UpdateModelMixin, GenericVie
 
         try:
             # check if the github repository contains the langauge spec file
-            is_found, master_file_name = GithubAPI.repository_has_sepc_files(tool_name, tool_language)
+            is_found, master_file_name, repository_file_names = \
+                GithubAPI.repository_has_sepc_files(tool_name, tool_language)
             if not master_file_name:
                 return Response(
                     {
                         'code': 1,
-                        'msg': f'Github does not include the {tool} tool master file'
+                        'msg': f'Github does not include the any seed files related to your requested spec file.'
+                               f' It includes {", ".join(repository_file_names)} for now'
                     },
                     status=status.HTTP_400_BAD_REQUEST
                 )
@@ -96,15 +108,112 @@ class ToolViewSet(ListModelMixin, CreateModelMixin, UpdateModelMixin, GenericVie
                 }
             )
 
-        # run request in background service
-        update_task.apply_async(
-            args=[{
-                'tool_name': tool_name,
-                'tool_language': tool_language
-            }]
-        )
-        serializer.save()
-        return Response(serializer.data)
+        # TODO: run request in background service
+        # I implemented it asynchronously in celery task
+        # update_task.apply_async(
+        #     args=[{
+        #         'tool_id': instance.id,
+        #         'tool_name': tool_name,
+        #         'tool_language': tool_language
+        #     }]
+        # )
+
+        try:
+            _, master_file_name, _ = GithubAPI.repository_has_sepc_files(tool_name, tool_language)
+            if not master_file_name:
+                # Github does not include the {tool_language} tool master file
+                return Response(
+                    {
+                        'code': 0,
+                        'msg': f"Github does not include the any seed files related to "
+                               f"your requested {tool_name} spec file."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            payload = GithubAPI.repository_read_spec(master_file_name)
+
+            # fetch language id from lokalise
+            page = 1
+            language_id = None
+
+            # handle pagination of fetching system-languages
+            while True:
+                languages = client.system_languages({"page": page})
+                for language in languages.items:
+                    if language.lang_iso == tool_language:
+                        language_id = language.lang_id
+                        break
+
+                if languages.is_last_page():
+                    break
+                page += 1
+
+            if not language_id:
+                # Your supplied language code {tool_language} does not exists
+                return Response(
+                    {
+                        'code': 0,
+                        'msg': f"Your Lokalise Project does not contains the {tool_language} translation"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # handle paginations of fetching keys
+            localise_dict = {}
+            page = 1
+            while True:
+                keys = client.keys(
+                    settings.LOKALISE_PROJECT_ID,
+                    {
+                        'page': page,
+                        'limit': 500,
+                        'disable_references': '1',
+                        'include_translations': '1',
+                        'filter_translation_lang_ids': [str(language_id)],
+                        'filter_tags': [tool_name]
+                    }
+                )
+                for key in keys.items:
+                    key_name = next(iter(key.key_name.values()))
+                    key_name = list(json.loads(key_name).values())[0]
+                    localise_dict[key_name] = key.translations[0]['translation']
+
+                if keys.is_last_page():
+                    break
+                page += 1
+
+            # Replace values in JSON with translations
+            populate_with_translating_value(payload, localise_dict, tool_name)
+            with open(f'{instance.id}.{tool_name}.{tool_language}.json', 'w') as f:
+                json.dump(payload, f, indent=4)
+
+            # create pull request
+            GithubAPI.create_pull_request(instance.id, tool_name, tool_language, payload)
+
+            return Response(
+                {
+                    'code': 0,
+                    'msg': 'Your request is accepted, Pending'
+                }
+            )
+
+        except GitHubApiError:
+            return Response(
+                {
+                    'code': 0,
+                    'msg': "Github api error"
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        except Exception as e:
+            return Response(
+                {
+                    'code': 0,
+                    'msg': f"{e}"
+                }
+            )
 
 
 class GitHookAPIView(APIView):
@@ -140,12 +249,15 @@ class GitHookAPIView(APIView):
             # I follow the such name conventions.
             # branch_name: updates/{name}/{language}
             changes = pull_request_payload.get('head', {}).get('ref')
-            tool_name = changes.split('/')[1]
-            tool_language = changes.split('/')[2]
+            tool_id = changes.split('/')[1]
+            tool_name = changes.split('/')[2]
+            tool_language = changes.split('/')[3]
             try:
-                tool = Tool.objects.get(language=tool_language, name=tool_name)
-                with open(f'{tool_name}.{tool_language}.json', 'r') as f:
+                tool = Tool.objects.get(pk=tool_id)
+                with open(f'{tool_id}.{tool_name}.{tool_language}.json', 'r') as f:
                     tool.json_spec = json.load(f)
+                tool.name = tool_name
+                tool.language = tool_language
                 tool.save()
             except Tool.DoesNotExist:
                 pass

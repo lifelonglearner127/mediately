@@ -60,13 +60,13 @@ class GithubAPI:
 
             for repository_file_name in repository_file_names:
                 if repository_file_name in master_file_candidate_names:
-                    return True, repository_file_name
+                    return True, repository_file_name, repository_file_names
 
                 if repository_file_name.split('.')[0] == tool_name and \
                    repository_file_name.endswith('.master.json'):
                     master_file_name = repository_file_name
 
-            return False, master_file_name
+            return False, master_file_name, repository_file_names
         except Exception:
             raise GitHubApiError
 
@@ -87,15 +87,15 @@ class GithubAPI:
             return json.loads(content.decoded_content)
 
     @staticmethod
-    def create_pull_request(tool_name, tool_language, json_payload):
+    def create_pull_request(tool_id, tool_name, tool_language, json_payload):
         # check if the file exist in the repository.
         # if not exists, create file, if exists, update file
-        file_name = f'{tool_name}.{tool_language}.json'
+        file_name = f'{tool_id}.{tool_name}.{tool_language}.json'
         payload = repo.get_contents("/")
         is_exists = file_name in [item.name for item in payload]
 
         # create branch
-        branch_name = f"updates/{tool_name}/{tool_language}"
+        branch_name = f"updates/{tool_id}/{tool_name}/{tool_language}"
         master_ref = repo.get_git_ref('heads/master')
         repo.create_git_ref(f'refs/heads/{branch_name}', master_ref.object.sha)
 
@@ -118,8 +118,8 @@ class GithubAPI:
 
         # pull requests
         repo.create_pull(
-            title=f"{tool_name}.{tool_language}",
-            body=f"{tool_name}.{tool_language}",
+            title=f"{tool_id}.{tool_name}.{tool_language}",
+            body=f"{tool_id}.{tool_name}.{tool_language}",
             head=branch_name,
             base="master"
         )
