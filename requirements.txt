@@ -92,7 +92,7 @@ python-lokalise-api==0.1.0
 python-slugify==4.0.0
 python3-openid==3.2.0
 pytz==2020.1
-PyYAML==5.3.1
+PyYAML==5.4
 redis==3.5.0
 regex==2020.6.8
 requests==2.24.0
